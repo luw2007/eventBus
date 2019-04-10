@@ -1,6 +1,6 @@
-#eventBus 事件订阅器
+# eventBus 事件订阅器
 
-##A Emitter 订阅器接口
+## A Emitter 订阅器接口
 - On/Once 绑定事件，绑定成功返回true，重复绑定返回false
 - Once 执行一次后自动清除，On 可以一直执行
 - Send 调用具体绑定方法实例
@@ -15,7 +15,7 @@ type Emitter interface {
 }
 ```
 
-##example
+## example
 ```go
 events := New()
 events.On("add", func(a, b int) {
