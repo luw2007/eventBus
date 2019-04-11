@@ -1,11 +1,10 @@
-// Package eventBus 事件订阅器
-package eventBus
+// Package eventbus 事件订阅器
+package eventbus
 
 import (
 	"errors"
 	"fmt"
 	"reflect"
-	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -36,41 +35,49 @@ type event struct {
 	key       string
 	once      bool
 	call      interface{}
-	args      []reflect.Value
+	argsNums  int
 	callTimes int32
 }
 
 // Call 事件执行方法
 func (e *event) Call(args []interface{}) (err error) {
-	if atomic.AddInt32(&e.callTimes, 1) > 1 && e.once {
-		return ErrNotFound
-	}
+	atomic.AddInt32(&e.callTimes, 1)
 	// 构造入参
 	f := reflect.ValueOf(e.call)
+	in := make([]reflect.Value, f.Type().NumIn())
 	for k, v := range args {
-		e.args[k] = reflect.ValueOf(v)
+		in[k] = reflect.ValueOf(v)
 	}
 	defer func() {
 		rec := recover()
 		if rec != nil {
-			stack := make([]byte, 4<<10) // 4 KB
-			length := runtime.Stack(stack, true)
-			fmt.Printf("[PANIC RECOVER] call %s panic: %s %s\n", e.key, rec, stack[:length])
+			fmt.Printf("[PANIC RECOVER] call %s panic: %s\n", e.key, rec)
 			err = ErrRuntimePanic
 		}
 	}()
-	f.Call(e.args)
-	return err
+	f.Call(in)
+	return
 }
 
 func (e *event) String() string {
 	return fmt.Sprintf("{key: %s, once: %t, callTimes: %d}", e.key, e.once, e.callTimes)
 }
 
+type sender struct {
+	e    *event
+	args []interface{}
+}
+
+func (s *sender) Call() (err error) {
+	return s.e.Call(s.args)
+}
+
 // EventBus 事件订阅器
 type EventBus struct {
 	// events 储存结构类似 map[string]*event,
 	events sync.Map
+	sender chan sender
+	done   chan bool
 }
 
 // On 注册订阅器，注册之后将实例放入 events中。在Send中调用
@@ -89,7 +96,7 @@ func (p *EventBus) on(e *event) error {
 		return ErrNotCallable
 	}
 	// 初始化入参，每次send 都会从入参中重新填充
-	e.args = make([]reflect.Value, f.Type().NumIn())
+	e.argsNums = f.Type().NumIn()
 	if _, ok := p.events.LoadOrStore(e.key, e); ok {
 		return ErrExists
 	}
@@ -107,15 +114,14 @@ func (p *EventBus) Send(eventKey string, args ...interface{}) error {
 		// 永远不会发生
 		return ErrEventType
 	}
-	if len(args) != len(e.args) {
+	if len(args) != e.argsNums {
 		return ErrArgsNotMatch
 	}
 	if e.once {
-		// 这里不关心处理结果删除一次注册，
-		// 如果需要保证成功执行，需要放到Call后面，判断Call结果
-		defer p.Remove(eventKey)
+		p.Remove(eventKey)
 	}
-	return e.Call(args)
+	p.sender <- sender{e: e, args: args}
+	return nil
 }
 
 // Remove 移除事件
@@ -123,7 +129,30 @@ func (p *EventBus) Remove(eventkey string) {
 	p.events.Delete(eventkey)
 }
 
-// 构建一个事件订阅器
+// Close 发出停止信号
+func (p *EventBus) Close() {
+	p.done <- true
+	// FIXME: 是否清理已经发不过来的任务？
+}
+
+// Loop 时间循环，后台消费sender的数据
+func (p *EventBus) Loop() {
+	for {
+		select {
+		case <-p.done:
+			break
+		case s := <-p.sender:
+			go s.Call()
+		}
+	}
+}
+
+// New 构建一个事件订阅器
 func New() *EventBus {
-	return &EventBus{}
+	bus := EventBus{
+		sender: make(chan sender),
+		done:   make(chan bool),
+	}
+	go bus.Loop()
+	return &bus
 }
